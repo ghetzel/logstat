@@ -1,8 +1,13 @@
 .PHONY: build test
-build:
-	go build -o bin/logstat
+build: deps
+	GO15VENDOREXPERIMENT=1 go build -o bin/logstat
 
-all: gotest build integration print
+all: deps gotest build integration print
+
+deps:
+	@go version | grep 'go1\.[0-4]' > /dev/null && \
+	(echo "Installing dependencies at '${GOPATH}' (Golang < 1.5)..." && GOBIN=${GOPATH}/bin go get) || \
+	exit 0
 
 gotest:
 	go test
