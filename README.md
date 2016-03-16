@@ -16,5 +16,5 @@ If you want to build `logstat` from source, you can checkout the repository and 
 ```sh
 git clone https://github.com/ghetzel/logstat.git
 cd logstat
-make
+make all
 ```
