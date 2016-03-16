@@ -29,6 +29,8 @@ var red    = color.New(color.FgRed).SprintFunc()
 var mx                    = new(sync.Mutex)
 var alertTriggered        = false
 var totalReqHistory *Ring
+var totalHitsCounter uint64
+
 var sectionStats          = make(map[string]*LogStatistic)
 var streamFinished        = make(chan bool)
 var observations          = 0
@@ -50,7 +52,7 @@ func main(){
             Usage:  `Show top site sections`,
         },
         cli.StringSliceFlag{
-            Name:   `only-sections, S`,
+            Name:   `with-section, S`,
             Usage:  `When displaying multiple sections (--top=false), choose which ones to show`,
         },
         cli.IntFlag{
@@ -64,17 +66,17 @@ func main(){
             Value:  DEFAULT_TOP_INTERVAL,
         },
         cli.BoolTFlag{
-            Name:   `request-rate-alerts, A`,
-            Usage:  `Show alerts when the total rate of requests seen exceeds a configured threshold`,
+            Name:   `request-hits-alerts, A`,
+            Usage:  `Show alerts when the total hits of requests per history window exceeds a configured threshold`,
         },
         cli.IntFlag{
-            Name:   `requests-max-rate, R`,
-            Usage:  `The maximum average requests/sec threshold`,
+            Name:   `requests-max-hits, R`,
+            Usage:  `The maximum average hit count threshold`,
             Value:  DEFAULT_MAX_REQUESTS_PER_SEC,
         },
         cli.IntFlag{
-            Name:   `request-rate-history, H`,
-            Usage:  `How many observations to store (at per-second resoltion) when averaging the request rate for alerting`,
+            Name:   `request-hits-history, H`,
+            Usage:  `How many observations to store (at per-second resoltion) when averaging the total hit count for alerting`,
             Value:  DEFAULT_REQUEST_RATE_HISTORY,
         },
         cli.BoolFlag{
@@ -104,6 +106,7 @@ func main(){
             err := ParseStream(os.Stdin, func(logLine NcsaLog, err error){
                 if err == nil {
                     mx.Lock()
+                    totalHitsCounter += 1
 
                     parts := strings.Split(logLine.Path, `/`)
 
@@ -122,6 +125,7 @@ func main(){
                         stat.Count += 1
                         stat.Sizes = append(stat.Sizes, logLine.Size)
                         stat.Logs  = append(stat.Logs, &logLine)
+
                     }
 
                     mx.Unlock()
@@ -137,16 +141,18 @@ func main(){
             }
         }()
 
-    //  allocate ring buffer if we're monitoring total request rate
-        if c.Bool(`request-rate-alerts`) {
-            log.Debugf("Monitoring total request rate (average over %d seconds should not exceed %d req/sec)", c.Int(`request-rate-history`), c.Int(`requests-max-rate`))
-            totalReqHistory = NewRing(c.Int(`request-rate-history`))
+    //  allocate ring buffer if we're monitoring average hit count
+        if c.Bool(`request-hits-alerts`) {
+            log.Debugf("Monitoring total hits (average over %d seconds should not exceed %d)", c.Int(`request-hits-history`), c.Int(`requests-max-hits`))
+            totalReqHistory = NewRing(c.Int(`request-hits-history`))
         }
 
         fmt.Printf("section \tcount \tresponses \n")
 
         for {
-            log.Infof("Time: %s", time.Now().Format(time.RFC3339))
+        //  update and reset hits/sec counter
+            UpdateHitCounter()
+
             select {
             case <-streamFinished:
                 ProcessLogs(c, true)
@@ -163,18 +169,16 @@ func main(){
 func ProcessLogs(c *cli.Context, forced bool) {
     observations += 1
 
-    mx.Lock()
-
 
     sections := make([]*LogStatistic, 0)
 
     var topSection *LogStatistic
-    var totalReqs uint64
+
+//  because we're working with a map that is accessed/modified across goroutines,
+//  we grab a mutex to safely iterate over it without risk of it changing midway through
+    mx.Lock()
 
     for _, stat := range sectionStats {
-
-        totalReqs += stat.Count
-
     //  if we're in "top" mode, accumulate logs on an interval and summarize them
         if c.Bool(`top`) {
             if topSection == nil {
@@ -187,7 +191,7 @@ func ProcessLogs(c *cli.Context, forced bool) {
 
     //  ...otherwise, we're processing all sections that we have stats for
         }else{
-            if onlySections := c.StringSlice(`only-sections`); len(onlySections) > 0 {
+            if onlySections := c.StringSlice(`with-section`); len(onlySections) > 0 {
                 for _, name := range onlySections {
                     if stat.Key == name {
                         sections = append(sections, stat)
@@ -201,20 +205,17 @@ func ProcessLogs(c *cli.Context, forced bool) {
         }
     }
 
+//  release mutex
+    mx.Unlock()
+
     if topSection != nil {
         sections = []*LogStatistic{ topSection }
     }
 
-
-    mx.Unlock()
-
-//  push this iteration's total requests if we're monitoring total request rate
-    if c.Bool(`request-rate-alerts`) {
-        totalReqHistory.Push(totalReqs)
-    }
-
 //  only print rollups and reset counters every <interval> seconds
     if observations % c.Int(`interval`) == 0 || forced {
+        log.Infof("Time: %s", time.Now().Format(time.RFC3339))
+
         for _, section := range sections {
             if section != nil {
                 fmt.Printf("%s \t%d \t", section.Key, section.Count)
@@ -257,48 +258,72 @@ func ProcessLogs(c *cli.Context, forced bool) {
 
     }
 
-    if c.Bool(`request-rate-alerts`) {
-    //  if at least <request-rate-history> writes have occurred since the last clear, we can check the history
+    if c.Bool(`request-hits-alerts`) {
+        mx.Lock()
+
+    //  if at least <request-hits-history> writes have occurred since the last clear, we can check the history
     //  for whether we should alert or not
         if totalReqHistory.WriteCount() >= totalReqHistory.Length() {
-            var avgRate uint64
+            var avgHits uint64
+
+            // log.Debugf("  Checking: %+v", totalReqHistory.Data)
 
             for _, v := range totalReqHistory.Data {
                 switch v.(type) {
                 case uint64:
-                    avgRate += v.(uint64)
+                    avgHits += v.(uint64)
+                default:
+                    log.Errorf("Unhandled history value type %T", v)
                 }
             }
 
-            avgRate = avgRate / uint64(totalReqHistory.Length())
+            avgHits = avgHits / uint64(totalReqHistory.Length())
 
 
         //  if the alert is in a triggered state, then we're checking to see if it has cleared
             if alertTriggered {
-                if avgRate < uint64(c.Int(`requests-max-rate`)) {
-                    log.Infof("Traffic rate has returned to normal levels - hits = %d req/sec at %s", avgRate, time.Now())
+                if avgHits < uint64(c.Int(`requests-max-hits`)) {
+                    log.Infof("Traffic has returned to normal levels - hits = %d at %s", avgHits, time.Now())
                     alertTriggered = false
+
+                //  clear the history to force it to re-accumulate in order to trigger the alert again
+                    totalReqHistory.Clear()
                 }
 
         //  ...otherwise, we check to see if we should be firing the alert
             }else{
-                if avgRate > uint64(c.Int(`requests-max-rate`)) {
-                    log.Errorf("High traffic generated an alert - hits = %d req/sec, triggered at %s", avgRate, time.Now())
+                if avgHits > uint64(c.Int(`requests-max-hits`)) {
+                    log.Errorf("High traffic generated an alert - hits = %d, triggered at %s", avgHits, time.Now())
                     alertTriggered = true
 
                 //  clear the history to force it to re-accumulate in order to clear the alert
                     totalReqHistory.Clear()
                 }else{
-                    log.Debugf("Rate in bounds (%d req/sec)", avgRate)
+                    log.Debugf("Traffic in bounds (average: %d hits)", avgHits)
                 }
             }
         }else{
-            log.Debugf("Waiting for rate history to populate (have %d, need >= %d)", totalReqHistory.WriteCount(), totalReqHistory.Length())
+            log.Debugf("Populating: %d/%d", totalReqHistory.WriteCount(), totalReqHistory.Length())
         }
+
+        mx.Unlock()
     }
 
 //  break if we've reached a desired number of iterations
     if c.Int(`count`) > 0 && observations >= c.Int(`count`) {
         return
     }
+}
+
+
+// This function will push the current hit count into the ring buffer
+// and then reset the count (synchronously)
+//
+func UpdateHitCounter() {
+    mx.Lock()
+
+    totalReqHistory.Push(totalHitsCounter)
+    totalHitsCounter = 0
+
+    mx.Unlock()
 }

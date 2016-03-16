@@ -34,7 +34,7 @@ rand_section(){
     echo "/help"
     ;;
   *)
-    echo "/${RANDOM}/${RANDOM}.gif"
+    echo "/profiles/${RANDOM}"
     ;;
   esac
 
@@ -60,5 +60,5 @@ rand_status(){
 while [ $i -lt ${1:-1} ]; do
   echo "$(rand_ip) - ${USER} [$(date +'%d/%b/%Y:%H:%M:%S %z')] \"$(rand_method) $(rand_section) HTTP/1.0\" $(rand_status) ${RANDOM}"
   i=$(( $i + 1 ))
-  sleep "0.${2:-$(( ${RANDOM} % 5 ))}"
+  sleep "${2:-0.$(( ${RANDOM} % 5 ))}"
 done
