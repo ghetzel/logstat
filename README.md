@@ -14,7 +14,7 @@ go get github.com/ghetzel/logstat
 If you want to build `logstat` from source, you can checkout the repository and build with the following commands:
 
 ```sh
-git clone github.com/ghetzel/logstat
+git clone https://github.com/ghetzel/logstat.git
 cd logstat
 make
 ```
