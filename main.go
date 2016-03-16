@@ -8,8 +8,6 @@ import (
     "sync"
     "time"
 
-    "./util"
-
     "github.com/codegangsta/cli"
     "github.com/fatih/color"
     log "github.com/Sirupsen/logrus"
@@ -86,7 +84,22 @@ func main(){
     }
 
     app.Action = func(c *cli.Context) {
-        util.ParseLogLevel(c.String(`log-level`))
+        log.SetOutput(os.Stderr)
+
+        switch c.String(`log-level`) {
+        case `info`:
+            log.SetLevel(log.InfoLevel)
+        case `warn`:
+            log.SetLevel(log.WarnLevel)
+        case `error`:
+            log.SetLevel(log.ErrorLevel)
+        case `fatal`:
+            log.SetLevel(log.FatalLevel)
+        case `quiet`:
+            log.SetLevel(log.PanicLevel)
+        default:
+            log.SetLevel(log.DebugLevel)
+        }
 
         if c.Bool(`no-color`) {
             color.NoColor = true
