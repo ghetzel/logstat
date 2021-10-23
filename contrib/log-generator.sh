@@ -48,8 +48,14 @@ rand_status(){
   8*|9[1-3])
     echo "302"
     ;;
-  9[4-8])
+  9[4-7])
     echo "404"
+    ;;
+  98)
+    echo "201"
+    ;;
+  99)
+    echo "418"
     ;;
   *)
     echo "500"
@@ -57,8 +63,6 @@ rand_status(){
   esac
 }
 
-while [ $i -lt ${1:-1} ]; do
+for i in $(seq ${1:-1000}); do
   echo "$(rand_ip) - ${USER} [$(date +'%d/%b/%Y:%H:%M:%S %z')] \"$(rand_method) $(rand_section) HTTP/1.0\" $(rand_status) ${RANDOM}"
-  i=$(( $i + 1 ))
-  sleep "${2:-0.$(( ${RANDOM} % 5 ))}"
 done
